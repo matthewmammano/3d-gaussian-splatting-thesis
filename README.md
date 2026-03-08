@@ -16,39 +16,49 @@ Baowen Zhang, Chuan Fang, Rakesh Shrestha, Yixun Liang, Xiaoxiao Long, Ping Tan
 
 
 # 1. Installation
-## Clone this repository.
+This repo now includes `submodules/simple-knn` directly (not as a separate submodule).
+
+1) Clone
 ```
-git clone https://github.com/BaowenZ/RaDe-GS.git --recursive
+git clone --recursive https://github.com/<YOUR_USER>/<YOUR_RADEGS_REPO>.git
+cd <YOUR_RADEGS_REPO>
 ```
 
-## Install dependencies.
-1. create an environment
+2) Choose environment path
+
+### A) Legacy GPU (GTX TITAN X / sm_52)
 ```
-conda create -n radegs python=3.12
+conda create -n radegs_sm52 python=3.10 -y
+conda activate radegs_sm52
+conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia
+pip install -r requirements_SM52.txt
+conda install -c nvidia cuda-toolkit=11.7
+conda install -c conda-forge gcc_linux-64=11 gxx_linux-64=11
+```
+
+Build vars (before extension install):
+```
+export CUDA_HOME="$CONDA_PREFIX"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+export TORCH_CUDA_ARCH_LIST="5.2"
+export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc"
+export CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++"
+export CUDAHOSTCXX="$CXX"
+```
+
+### B) Modern GPU / newer machines
+```
+conda create -n radegs python=3.12 -y
 conda activate radegs
-```
-
-2. install pytorch and other dependencies.
-```
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install -r requirements.txt
+pip install -r requirements_MODERN.txt
 ```
 
-3. install submodules
+3) Build CUDA extensions (both paths)
 ```
 pip install submodules/diff-gaussian-rasterization --no-build-isolation
 pip install submodules/simple-knn/ --no-build-isolation
-
-# tetra-nerf for Marching Tetrahedra
-cd submodules/tetra_triangulation
-conda install cmake
-conda install conda-forge::gmp
-conda install conda-forge::cgal
-cmake .
-# you can specify your own cuda path
-# export CPATH=/usr/local/cuda/include:$CPATH
-make 
-pip install -e .
 ```
 
 # 2. Preparation
@@ -95,7 +105,7 @@ python eval_tnt/run.py --dataset-dir <path to GT TNT dataset> --traj-path <path 
 ```
 python train.py -s <path to COLMAP or NeRF Synthetic dataset> --eval
 python render.py -m <path to pre-trained model> -s <path to dataset>
-python metrics.py -m <path to trained model> # Compute error metrics on renderings
+python metric.py -m <path to trained model> # Compute error metrics on renderings
 ```
 Our model can directly render coordinate map for training, without the need to first render a depth map and then convert it. This feature can be activated by including `--use_coord_map` in the argument list of 'train.py'.
 
