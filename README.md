@@ -22,7 +22,12 @@ git clone --recursive https://github.com/matthewmammano/3d-gaussian-splatting-th
 cd 3d-gaussian-splatting-thesis
 ```
 
-2) Choose environment:
+2) Activate conda (use full path for Fedora Atomic and similar systems):
+```
+source ~/miniconda3/bin/activate
+```
+
+3) Choose environment:
 
 SM52 / GTX TITAN X:
 ```
