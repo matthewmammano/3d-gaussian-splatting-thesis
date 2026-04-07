@@ -797,7 +797,7 @@ class GaussianModel:
         )
 
     # use the same densification strategy as GOF https://github.com/autonomousvision/gaussian-opacity-fields
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, big_points_ws_factor=0.1):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -816,7 +816,7 @@ class GaussianModel:
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            big_points_ws = self.get_scaling.max(dim=1).values > big_points_ws_factor * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         prune = self._xyz.shape[0]

@@ -10,6 +10,7 @@
 #
 
 import os
+import random
 import sys
 import uuid
 from argparse import ArgumentParser, Namespace
@@ -116,7 +117,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     require_depth = not dataset.use_coord_map
     require_coord = dataset.use_coord_map
 
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_start = first_iter
+    progress_total = opt.iterations - progress_start
+    progress_update_step = max(1, progress_total // 10)
+    progress_bar = tqdm(total=progress_total, desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -229,11 +233,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_normal_loss_for_log = 0.4 * depth_normal_loss.item() + 0.6 * ema_normal_loss_for_log
 
-            if iteration % 10 == 0:
+            completed = iteration - progress_start
+            if completed >= progress_bar.n + progress_update_step or iteration == opt.iterations:
                 progress_bar.set_postfix(
-                    {"Loss": f"{ema_loss_for_log:.{4}f}", "loss_normal": f"{ema_normal_loss_for_log:.{4}f}"}
+                    {"Loss": f"{ema_loss_for_log:.4f}", "loss_normal": f"{ema_normal_loss_for_log:.4f}"}
                 )
-                progress_bar.update(10)
+                progress_bar.update(completed - progress_bar.n)
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -259,7 +264,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.reset_gaussianpop_error()
                 quant_cameras = trainCameras
                 if opt.gaussianpop_views_per_quant > 0 and opt.gaussianpop_views_per_quant < len(trainCameras):
-                    quant_cameras = trainCameras[: opt.gaussianpop_views_per_quant]
+                    quant_cameras = random.sample(trainCameras, opt.gaussianpop_views_per_quant)
 
                 for quant_cam in quant_cameras:
                     quant_pkg = quantify_gaussianpop_error(
@@ -280,6 +285,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.reset_3D_filter()
                     else:
                         gaussians.compute_3D_filter(cameras=trainCameras)
+                    # Render outputs (visibility_filter, radii) are stale after
+                    # pruning changed the Gaussian count — skip densification
+                    # bookkeeping this iteration.
+                    continue
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -290,8 +299,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold)
+                    size_threshold = opt.max_screen_size if iteration > opt.opacity_reset_interval else None
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.min_opacity, scene.cameras_extent, size_threshold, opt.big_points_ws)
                     if dataset.disable_filter3D:
                         gaussians.reset_3D_filter()
                     else:

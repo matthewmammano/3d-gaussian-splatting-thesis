@@ -68,7 +68,12 @@ def evaluate(model_paths):
                 psnrs = []
                 lpipss = []
 
-                for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
+                metric_progress = tqdm(
+                    range(len(renders)),
+                    desc="Metric evaluation progress",
+                    miniters=max(1, len(renders) // 10),
+                )
+                for idx in metric_progress:
                     ssims.append(ssim(renders[idx], gts[idx]))
                     psnrs.append(psnr(renders[idx], gts[idx]))
                     lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))

@@ -34,6 +34,26 @@
 
 ---
 
+## GaussianPOP pruning flags
+
+### `gaussianpop_enable`
+- **Default:** `False`
+- Enables scheduled GaussianPOP error quantification + pruning during training.
+
+### `gaussianpop_prune_iterations`
+- **Default:** `"15000,20000"`
+- CSV list of prune iterations.
+
+### `gaussianpop_prune_ratios`
+- **Default:** `"0.5,0.5"`
+- CSV list of prune fractions used at those iterations.
+
+### `gaussianpop_views_per_quant`
+- **Default:** `0`
+- Number of train views used for scoring before pruning. `0` means all views.
+
+---
+
 ## 2. THRESHOLD PARAMETERS (Pruning Criteria)
 
 ### `min_opacity` (Pruning)
