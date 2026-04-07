@@ -146,6 +146,19 @@ namespace CudaRasterizer
 			float* out_sdf = nullptr,
 			bool* condition = nullptr,
 			bool debug = false);
+
+		static void quantifyGaussianPopError(
+			const int P,
+			const int R,
+			const int width,
+			const int height,
+			const float* colors_precomp,
+			char* geom_buffer,
+			char* binning_buffer,
+			char* img_buffer,
+			const float* rendered_color,
+			float* gaussian_error,
+			bool debug = false);
 	};
 	
 };

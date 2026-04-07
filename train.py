@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, quantify_gaussianpop_error, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
@@ -32,6 +32,14 @@ except ImportError:
 from scene.cameras import Camera
 import matplotlib.pyplot as plt
 from utils.vis_utils import apply_depth_colormap
+
+
+def _parse_csv_ints(csv_text):
+    return [int(x.strip()) for x in str(csv_text).split(",") if x.strip()]
+
+
+def _parse_csv_floats(csv_text):
+    return [float(x.strip()) for x in str(csv_text).split(",") if x.strip()]
 
 # function L1_loss_appearance is fork from GOF https://github.com/autonomousvision/gaussian-opacity-fields/blob/main/train.py
 def L1_loss_appearance(image, gt_image, gaussians, view_idx, return_transformed_image=False):
@@ -82,6 +90,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log, ema_depth_loss_for_log, ema_mask_loss_for_log, ema_normal_loss_for_log = 0.0, 0.0, 0.0, 0.0
+
+    gaussianpop_schedule = {}
+    if opt.gaussianpop_enable:
+        schedule_iters = _parse_csv_ints(opt.gaussianpop_prune_iterations)
+        schedule_ratios = _parse_csv_floats(opt.gaussianpop_prune_ratios)
+        if len(schedule_iters) == 0:
+            raise ValueError("gaussianpop_prune_iterations must contain at least one iteration when gaussianpop_enable is set")
+        if len(schedule_ratios) == 0:
+            raise ValueError("gaussianpop_prune_ratios must contain at least one ratio when gaussianpop_enable is set")
+        if len(schedule_ratios) < len(schedule_iters):
+            schedule_ratios.extend([schedule_ratios[-1]] * (len(schedule_iters) - len(schedule_ratios)))
+        gaussianpop_schedule = {it: ratio for it, ratio in zip(schedule_iters, schedule_ratios)}
 
     require_depth = not dataset.use_coord_map
     require_coord = dataset.use_coord_map
@@ -180,6 +200,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+
+            if opt.gaussianpop_enable and iteration in gaussianpop_schedule:
+                gaussians.reset_gaussianpop_error()
+                quant_cameras = trainCameras
+                if opt.gaussianpop_views_per_quant > 0 and opt.gaussianpop_views_per_quant < len(trainCameras):
+                    quant_cameras = trainCameras[:opt.gaussianpop_views_per_quant]
+
+                for quant_cam in quant_cameras:
+                    quant_pkg = quantify_gaussianpop_error(
+                        quant_cam,
+                        gaussians,
+                        pipe,
+                        background,
+                        kernel_size,
+                    )
+                    gaussians.accumulate_gaussianpop_error(quant_pkg["gaussian_error"])
+
+                prune_ratio = gaussianpop_schedule[iteration]
+                n_pruned = gaussians.prune_by_gaussianpop_ratio(prune_ratio)
+                print("[ITER {}] GaussianPOP prune ratio {} -> pruned {}".format(iteration, prune_ratio, n_pruned))
+
+                if n_pruned > 0:
+                    if dataset.disable_filter3D:
+                        gaussians.reset_3D_filter()
+                    else:
+                        gaussians.compute_3D_filter(cameras=trainCameras)
 
             # Densification
             if iteration < opt.densify_until_iter:

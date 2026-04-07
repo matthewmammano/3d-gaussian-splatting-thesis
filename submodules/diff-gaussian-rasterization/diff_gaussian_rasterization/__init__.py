@@ -41,6 +41,87 @@ def rasterize_gaussians(
         raster_settings,
     )
 
+def _build_rasterize_args(
+    means3D,
+    colors_precomp,
+    opacities,
+    scales,
+    rotations,
+    cov3Ds_precomp,
+    sh,
+    raster_settings,
+):
+    return (
+        raster_settings.bg,
+        means3D,
+        colors_precomp,
+        opacities,
+        scales,
+        rotations,
+        raster_settings.scale_modifier,
+        cov3Ds_precomp,
+        raster_settings.viewmatrix,
+        raster_settings.projmatrix,
+        raster_settings.tanfovx,
+        raster_settings.tanfovy,
+        raster_settings.kernel_size,
+        raster_settings.image_height,
+        raster_settings.image_width,
+        sh,
+        raster_settings.sh_degree,
+        raster_settings.campos,
+        raster_settings.prefiltered,
+        raster_settings.require_coord,
+        raster_settings.require_depth,
+        raster_settings.debug,
+    )
+
+def rasterize_gaussians_with_aux(
+    means3D,
+    means2D,
+    sh,
+    colors_precomp,
+    opacities,
+    scales,
+    rotations,
+    cov3Ds_precomp,
+    raster_settings,
+):
+    args = _build_rasterize_args(
+        means3D,
+        colors_precomp,
+        opacities,
+        scales,
+        rotations,
+        cov3Ds_precomp,
+        sh,
+        raster_settings,
+    )
+    return _C.rasterize_gaussians(*args)
+
+def gaussianpop_quantify_error(
+    means3D,
+    colors_precomp,
+    rendered_color,
+    geomBuffer,
+    num_rendered,
+    binningBuffer,
+    imgBuffer,
+    debug=False,
+):
+    if colors_precomp is None:
+        colors_precomp = torch.Tensor([])
+    return _C.gaussianpop_quantify_error(
+        means3D,
+        colors_precomp,
+        rendered_color,
+        geomBuffer,
+        int(num_rendered),
+        binningBuffer,
+        imgBuffer,
+        debug,
+    )
+
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -56,30 +137,15 @@ class _RasterizeGaussians(torch.autograd.Function):
         raster_settings,
     ):
 
-        # Restructure arguments the way that the C++ lib expects them
-        args = (
-            raster_settings.bg, 
+        args = _build_rasterize_args(
             means3D,
             colors_precomp,
             opacities,
             scales,
             rotations,
-            raster_settings.scale_modifier,
             cov3Ds_precomp,
-            raster_settings.viewmatrix,
-            raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            raster_settings.kernel_size,
-            raster_settings.image_height,
-            raster_settings.image_width,
             sh,
-            raster_settings.sh_degree,
-            raster_settings.campos,
-            raster_settings.prefiltered,
-            raster_settings.require_coord,
-            raster_settings.require_depth,
-            raster_settings.debug
+            raster_settings,
         )
 
         # Invoke C++/CUDA rasterizer
@@ -201,6 +267,18 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
+    def quantify_error(self, means3D, colors_precomp, rendered_color, geomBuffer, num_rendered, binningBuffer, imgBuffer):
+        return gaussianpop_quantify_error(
+            means3D,
+            colors_precomp,
+            rendered_color,
+            geomBuffer,
+            num_rendered,
+            binningBuffer,
+            imgBuffer,
+            self.raster_settings.debug,
+        )
+
     def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
         
         raster_settings = self.raster_settings
@@ -234,6 +312,38 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings, 
+        )
+
+    def forward_with_aux(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+        raster_settings = self.raster_settings
+
+        if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
+            raise Exception('Please provide excatly one of either SHs or precomputed colors!')
+
+        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
+            raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
+
+        if shs is None:
+            shs = torch.Tensor([])
+        if colors_precomp is None:
+            colors_precomp = torch.Tensor([])
+        if scales is None:
+            scales = torch.Tensor([])
+        if rotations is None:
+            rotations = torch.Tensor([])
+        if cov3D_precomp is None:
+            cov3D_precomp = torch.Tensor([])
+
+        return rasterize_gaussians_with_aux(
+            means3D,
+            means2D,
+            shs,
+            colors_precomp,
+            opacities,
+            scales,
+            rotations,
+            cov3D_precomp,
+            raster_settings,
         )
     
     def integrate(self, points3D, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, view2gaussian_precomp = None):

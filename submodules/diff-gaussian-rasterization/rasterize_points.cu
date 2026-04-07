@@ -266,6 +266,51 @@ torch::Tensor markVisible(
   return present;
 }
 
+torch::Tensor QuantifyGaussianPopErrorCUDA(
+	const torch::Tensor& means3D,
+	const torch::Tensor& colors,
+	const torch::Tensor& rendered_color,
+	const torch::Tensor& geomBuffer,
+	const int R,
+	const torch::Tensor& binningBuffer,
+	const torch::Tensor& imageBuffer,
+	const bool debug)
+{
+	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
+		AT_ERROR("means3D must have dimensions (num_points, 3)");
+	}
+	if (rendered_color.ndimension() != 3 || rendered_color.size(0) != NUM_CHANNELS) {
+		AT_ERROR("rendered_color must have dimensions (NUM_CHANNELS, H, W)");
+	}
+
+	const int P = means3D.size(0);
+	const int H = rendered_color.size(1);
+	const int W = rendered_color.size(2);
+
+	torch::Tensor gaussian_error = torch::zeros({P}, means3D.options().dtype(torch::kFloat32));
+	if (P == 0 || R == 0)
+		return gaussian_error;
+
+	const float* color_ptr = nullptr;
+	if (colors.numel() > 0)
+		color_ptr = colors.contiguous().data<float>();
+
+	CudaRasterizer::Rasterizer::quantifyGaussianPopError(
+		P,
+		R,
+		W,
+		H,
+		color_ptr,
+		reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
+		reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
+		reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
+		rendered_color.contiguous().data<float>(),
+		gaussian_error.contiguous().data<float>(),
+		debug);
+
+	return gaussian_error;
+}
+
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 IntegrateGaussiansToPointsCUDA(
 	const torch::Tensor& background,

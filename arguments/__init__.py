@@ -95,6 +95,10 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 15_000
         self.regularization_from_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        self.gaussianpop_enable = False
+        self.gaussianpop_prune_iterations = "15000,20000"
+        self.gaussianpop_prune_ratios = "0.5,0.5"
+        self.gaussianpop_views_per_quant = 0
 
         super().__init__(parser, "Optimization Parameters")
 

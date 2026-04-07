@@ -741,6 +741,130 @@ renderCUDA<NUM_CHANNELS, template_coord, template_depth, template_normal> <<<gri
 #undef RENDER_CUDA_CALL
 }
 
+template <uint32_t CHANNELS>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+quantifyErrorCUDA(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ features,
+	const float4* __restrict__ conic_opacity,
+	const float* __restrict__ rendered_color,
+	float* __restrict__ gaussian_error,
+	const int max_contrib)
+{
+	auto block = cg::this_thread_block();
+	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y, H) };
+	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	uint32_t pix_id = W * pix.y + pix.x;
+	float2 pixf = { (float)pix.x, (float)pix.y };
+
+	bool inside = pix.x < W && pix.y < H;
+	bool done = !inside;
+
+	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	int toDo = range.y - range.x;
+
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float collected_feature[BLOCK_SIZE * CHANNELS];
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+
+	float T = 1.0f;
+	float prefix_color[CHANNELS] = { 0 };
+	int used_contrib = 0;
+
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		int num_done = __syncthreads_count(done);
+		if (num_done == BLOCK_SIZE)
+			break;
+
+		int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y)
+		{
+			int coll_id = point_list[range.x + progress];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			for (int ch = 0; ch < CHANNELS; ch++)
+				collected_feature[ch * BLOCK_SIZE + block.thread_rank()] = features[coll_id * CHANNELS + ch];
+		}
+		block.sync();
+
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		{
+			float2 xy = collected_xy[j];
+			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			float4 con_o = collected_conic_opacity[j];
+			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			if (power > 0.0f)
+				continue;
+
+			float alpha = min(0.99f, con_o.w * exp(power));
+			if (alpha < 1.0f / 255.0f)
+				continue;
+
+			if (used_contrib >= max_contrib)
+			{
+				done = true;
+				continue;
+			}
+
+			float aT = alpha * T;
+			float T_next = T * (1.0f - alpha);
+			float inv_T_next = 1.0f / (T_next + 1.0e-9f);
+
+			float err = 0.0f;
+			for (int ch = 0; ch < CHANNELS; ch++)
+			{
+				float c_k = collected_feature[j + BLOCK_SIZE * ch];
+				prefix_color[ch] += c_k * aT;
+				float c_render = rendered_color[ch * H * W + pix_id];
+				float b_k1 = (c_render - prefix_color[ch]) * inv_T_next;
+				float delta = aT * (c_k - b_k1);
+				err += delta * delta;
+			}
+
+			atomicAdd(gaussian_error + collected_id[j], err);
+
+			T = T_next;
+			used_contrib++;
+			if (T < 0.0001f)
+				done = true;
+		}
+	}
+}
+
+void FORWARD::quantify_error(
+	const dim3 grid, dim3 block,
+	const uint2* ranges,
+	const uint32_t* point_list,
+	int W, int H,
+	const float2* means2D,
+	const float* colors,
+	const float4* conic_opacity,
+	const float* rendered_color,
+	float* gaussian_error,
+	int max_contrib)
+{
+	quantifyErrorCUDA<NUM_CHANNELS><<<grid, block>>>(
+		ranges,
+		point_list,
+		W,
+		H,
+		means2D,
+		colors,
+		conic_opacity,
+		rendered_color,
+		gaussian_error,
+		max_contrib);
+}
+
 void FORWARD::preprocess(int P, int D, int M,
 	const float* means3D,
 	const glm::vec3* scales,

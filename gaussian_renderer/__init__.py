@@ -94,6 +94,64 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "normal":rendered_normal,
             }
 
+@torch.no_grad()
+def quantify_gaussianpop_error(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size, scaling_modifier = 1.0):
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=False, device="cuda")
+
+    raster_settings = GaussianRasterizationSettings(
+        image_height=int(viewpoint_camera.image_height),
+        image_width=int(viewpoint_camera.image_width),
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        kernel_size=kernel_size,
+        bg=bg_color,
+        scale_modifier=scaling_modifier,
+        viewmatrix=viewpoint_camera.world_view_transform,
+        projmatrix=viewpoint_camera.full_proj_transform,
+        sh_degree=pc.active_sh_degree,
+        campos=viewpoint_camera.camera_center,
+        prefiltered=False,
+        require_coord=False,
+        require_depth=False,
+        debug=pipe.debug,
+    )
+
+    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+    means3D = pc.get_xyz
+    scales, opacity = pc.get_scaling_n_opacity_with_3D_filter
+    rotations = pc.get_rotation
+    shs = pc.get_features
+    colors_precomp = None
+
+    num_rendered, rendered_image, _, _, _, _, _, _, radii, geom_buffer, binning_buffer, img_buffer = rasterizer.forward_with_aux(
+        means3D=means3D,
+        means2D=screenspace_points,
+        shs=shs,
+        colors_precomp=colors_precomp,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=None,
+    )
+
+    gaussian_error = rasterizer.quantify_error(
+        means3D=means3D,
+        colors_precomp=colors_precomp,
+        rendered_color=rendered_image,
+        geomBuffer=geom_buffer,
+        num_rendered=num_rendered,
+        binningBuffer=binning_buffer,
+        imgBuffer=img_buffer,
+    )
+
+    return {
+        "gaussian_error": gaussian_error,
+        "num_rendered": num_rendered,
+        "visibility_filter": radii > 0,
+    }
+
 # integration is adopted from GOF for marching tetrahedra https://github.com/autonomousvision/gaussian-opacity-fields/blob/main/gaussian_renderer/__init__.py
 def integrate(points3D, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size : float, scaling_modifier = 1.0, override_color = None):
     """

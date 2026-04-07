@@ -842,3 +842,41 @@ int CudaRasterizer::Rasterizer::integrate(
 
 	return num_rendered;
 }
+
+void CudaRasterizer::Rasterizer::quantifyGaussianPopError(
+	const int P,
+	const int R,
+	const int width,
+	const int height,
+	const float* colors_precomp,
+	char* geom_buffer,
+	char* binning_buffer,
+	char* img_buffer,
+	const float* rendered_color,
+	float* gaussian_error,
+	bool debug)
+{
+	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
+
+	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	const float* feature_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
+	constexpr int GAUSSIANPOP_MAX_CONTRIB = 64;
+
+	CHECK_CUDA(FORWARD::quantify_error(
+		tile_grid,
+		block,
+		imgState.ranges,
+		binningState.point_list,
+		width,
+		height,
+		geomState.means2D,
+		feature_ptr,
+		geomState.conic_opacity,
+		rendered_color,
+		gaussian_error,
+		GAUSSIANPOP_MAX_CONTRIB), debug)
+}

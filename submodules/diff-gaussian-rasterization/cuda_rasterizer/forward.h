@@ -86,6 +86,19 @@ namespace FORWARD
 		bool require_coord,
 		bool require_depth);
 
+	// GaussianPOP per-Gaussian error accumulation from a rendered frame.
+	void quantify_error(
+		const dim3 grid, dim3 block,
+		const uint2* ranges,
+		const uint32_t* point_list,
+		int W, int H,
+		const float2* means2D,
+		const float* colors,
+		const float4* conic_opacity,
+		const float* rendered_color,
+		float* gaussian_error,
+		int max_contrib);
+
 	//follow code is adopted from GOF for marching tetrahedra https://github.com/autonomousvision/gaussian-opacity-fields
 	// Perform initial steps for each Point prior to integration.
 	void preprocess_points(int PN, int D, int M,

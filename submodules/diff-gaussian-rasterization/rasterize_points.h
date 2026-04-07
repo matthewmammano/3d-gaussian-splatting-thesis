@@ -105,3 +105,13 @@ IntegrateGaussiansToPointsCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool debug);
+
+torch::Tensor QuantifyGaussianPopErrorCUDA(
+	const torch::Tensor& means3D,
+	const torch::Tensor& colors,
+	const torch::Tensor& rendered_color,
+	const torch::Tensor& geomBuffer,
+	const int R,
+	const torch::Tensor& binningBuffer,
+	const torch::Tensor& imageBuffer,
+	const bool debug);

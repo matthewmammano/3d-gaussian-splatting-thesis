@@ -59,6 +59,7 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self._gaussianpop_error = torch.empty(0)
         self.setup_functions()
         # appearance network and appearance embedding
         # this module is adopted from GOF
@@ -170,6 +171,35 @@ class GaussianModel:
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    @property
+    def get_gaussianpop_error(self):
+        return self._gaussianpop_error
+
+    @torch.no_grad()
+    def reset_gaussianpop_error(self):
+        self._gaussianpop_error = torch.zeros((self.get_xyz.shape[0]), dtype=torch.float32, device="cuda")
+
+    @torch.no_grad()
+    def accumulate_gaussianpop_error(self, gaussian_error):
+        if self._gaussianpop_error.numel() != self.get_xyz.shape[0]:
+            self.reset_gaussianpop_error()
+        self._gaussianpop_error += gaussian_error
+
+    @torch.no_grad()
+    def prune_by_gaussianpop_ratio(self, prune_ratio):
+        prune_ratio = float(prune_ratio)
+        if prune_ratio <= 0.0 or self.get_xyz.shape[0] == 0:
+            return 0
+        n_prune = int(self.get_xyz.shape[0] * prune_ratio)
+        if n_prune <= 0:
+            return 0
+
+        ids = torch.topk(self._gaussianpop_error, k=n_prune, largest=False).indices
+        prune_mask = torch.zeros((self.get_xyz.shape[0]), device="cuda", dtype=torch.bool)
+        prune_mask[ids] = True
+        self.prune_points(prune_mask)
+        return n_prune
     
     @torch.no_grad()
     def reset_3D_filter(self):
@@ -326,6 +356,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.reset_gaussianpop_error()
 
 
     def training_setup(self, training_args):
@@ -557,6 +588,7 @@ class GaussianModel:
         self.filter_3D = torch.tensor(filter_3D, dtype=torch.float, device="cuda")
 
         self.active_sh_degree = self.max_sh_degree
+        self.reset_gaussianpop_error()
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -611,6 +643,8 @@ class GaussianModel:
         self.xyz_gradient_accum_abs_max = self.xyz_gradient_accum_abs_max[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        if self._gaussianpop_error.numel() == valid_points_mask.shape[0]:
+            self._gaussianpop_error = self._gaussianpop_error[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -657,6 +691,11 @@ class GaussianModel:
         self.xyz_gradient_accum_abs_max = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        if self._gaussianpop_error.numel() > 0:
+            self._gaussianpop_error = torch.cat(
+                [self._gaussianpop_error, torch.zeros((extension_num), dtype=torch.float32, device="cuda")],
+                dim=0,
+            )
         # self.max_radii2D = torch.cat([self.max_radii2D,torch.zeros(extension_num, device="cuda")])
 
     def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2):
