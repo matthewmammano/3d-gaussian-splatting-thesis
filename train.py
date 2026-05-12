@@ -17,10 +17,11 @@ from argparse import ArgumentParser, Namespace
 from random import randint
 
 import torch
+from tqdm import tqdm
+
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import network_gui, quantify_gaussianpop_error, render
 from scene import GaussianModel, Scene
-from tqdm import tqdm
 from utils.general_utils import safe_state
 from utils.graphics_utils import depth_double_to_normal, point_double_to_normal
 from utils.image_utils import psnr
@@ -114,13 +115,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             schedule_ratios.extend([schedule_ratios[-1]] * (len(schedule_iters) - len(schedule_ratios)))
         gaussianpop_schedule = {it: ratio for it, ratio in zip(schedule_iters, schedule_ratios)}
 
+        # Set error aggregation method and parameters
+        agg_params = {}
+        agg_method = getattr(opt, "gaussianpop_error_agg_method", "sum").lower()
+        if agg_method == "topk_mean":
+            agg_params["k_percent"] = float(getattr(opt, "gaussianpop_error_topk_percent", 50))
+        elif agg_method == "lp_norm":
+            agg_params["p"] = float(getattr(opt, "gaussianpop_error_lp_p", 2))
+        min_visible_views = int(getattr(opt, "gaussianpop_error_min_visible_views", 0))
+        if min_visible_views > 0:
+            agg_params["min_visible_views"] = min_visible_views
+        vis_mode = str(getattr(opt, "gaussianpop_visibility_mode", "all_views")).lower()
+        gaussians.set_gaussianpop_aggregation(agg_method, agg_params, vis_mode)
+
     require_depth = not dataset.use_coord_map
     require_coord = dataset.use_coord_map
 
     progress_start = first_iter
     progress_total = opt.iterations - progress_start
     progress_update_step = max(1, progress_total // 10)
-    progress_bar = tqdm(total=progress_total, desc="Training progress")
+    progress_bar = tqdm(total=progress_total, desc="Training progress", disable=True)
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -274,7 +288,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         background,
                         kernel_size,
                     )
-                    gaussians.accumulate_gaussianpop_error(quant_pkg["gaussian_error"])
+                    gaussians.accumulate_gaussianpop_error(
+                        quant_pkg["gaussian_error"],
+                        quant_pkg.get("visibility_filter"),
+                    )
 
                 prune_ratio = gaussianpop_schedule[iteration]
                 n_pruned = gaussians.prune_by_gaussianpop_ratio(prune_ratio)
@@ -285,6 +302,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.reset_3D_filter()
                     else:
                         gaussians.compute_3D_filter(cameras=trainCameras)
+                    # Re-save point cloud so PLY captures post-prune state.
+                    if iteration in saving_iterations:
+                        scene.save(iteration)
+                    # Save checkpoint BEFORE continue — otherwise the regular
+                    # checkpoint block below is bypassed and chkpnt*.pth is
+                    # never written, breaking posttrain cycle chaining.
+                    if iteration in checkpoint_iterations:
+                        print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                        torch.save(
+                            (gaussians.capture(), iteration),
+                            scene.model_path + "/chkpnt" + str(iteration) + ".pth",
+                        )
                     # Render outputs (visibility_filter, radii) are stale after
                     # pruning changed the Gaussian count — skip densification
                     # bookkeeping this iteration.
@@ -300,7 +329,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = opt.max_screen_size if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.min_opacity, scene.cameras_extent, size_threshold, opt.big_points_ws)
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        opt.min_opacity,
+                        scene.cameras_extent,
+                        size_threshold,
+                        opt.big_points_ws,
+                    )
                     if dataset.disable_filter3D:
                         gaussians.reset_3D_filter()
                     else:
@@ -434,11 +469,21 @@ if __name__ == "__main__":
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--skip_save_iterations", action="store_true", default=False)
+    parser.add_argument("--skip_test_iterations", action="store_true", default=False)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[15000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=None)
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+    args.checkpoint_iterations = args.checkpoint_iterations or []
+    if args.skip_save_iterations:
+        args.save_iterations = []
+    else:
+        args.save_iterations.append(args.iterations)
+    if args.iterations not in args.checkpoint_iterations:
+        args.checkpoint_iterations.append(args.iterations)
+    if args.skip_test_iterations:
+        args.test_iterations = []
 
     print("Optimizing " + args.model_path)
 

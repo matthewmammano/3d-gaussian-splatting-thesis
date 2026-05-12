@@ -105,8 +105,15 @@ class OptimizationParams(ParamGroup):
         self.big_points_ws = 0.1
         self.gaussianpop_enable = False
         self.gaussianpop_prune_iterations = "15000,20000"
-        self.gaussianpop_prune_ratios = "0.35,0.35"
+        self.gaussianpop_prune_ratios = "0.65,0.70"
         self.gaussianpop_views_per_quant = 0
+        self.gaussianpop_error_agg_method = "sum"  # sum, max, median, topk_mean, lp_norm
+        self.gaussianpop_error_topk_percent = 50  # For topk_mean: what % of top views to average
+        self.gaussianpop_error_lp_p = 2  # For lp_norm: the p value (1, 2, 4, 8, etc.)
+        self.gaussianpop_visibility_mode = "all_views"  # all_views, visible_only
+        self.gaussianpop_error_min_visible_views = (
+            0  # If >0 in visible_only mode, force-prune gaussians seen in fewer views
+        )
 
         super().__init__(parser, "Optimization Parameters")
 

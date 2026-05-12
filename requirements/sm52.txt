@@ -33,6 +33,7 @@ dash==4.0.0
 
 # === Config / CLI ===
 ConfigArgParse==1.7.1
+jsonc==1.1.0
 PyYAML==6.0.3
 tqdm==4.67.3
 

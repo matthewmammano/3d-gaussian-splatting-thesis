@@ -113,8 +113,8 @@ python train.py -s "$DATA" -m "$OUT" -r 2 --use_decoupled_appearance --eval --it
 python train.py -s "$DATA" -m "$OUT" -r 2 --use_decoupled_appearance --eval \
   --gaussianpop_enable \
   --gaussianpop_prune_iterations 15000,20000 \
-  --gaussianpop_prune_ratios 0.35,0.35 \
-  --gaussianpop_views_per_quant 8
+  --gaussianpop_prune_ratios 0.65,0.70 \
+  --gaussianpop_views_per_quant 0
 ```
 
 ### Train flags explained

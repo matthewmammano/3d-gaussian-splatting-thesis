@@ -45,7 +45,7 @@
 - CSV list of prune iterations.
 
 ### `gaussianpop_prune_ratios`
-- **Default:** `"0.5,0.5"`
+- **Default:** `"0.65,0.70"` (DTU paper-aligned)
 - CSV list of prune fractions used at those iterations.
 
 ### `gaussianpop_views_per_quant`

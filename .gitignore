@@ -17,3 +17,8 @@ submodules/diff-gaussian-rasterization-org
 snapshot_fw.dump
 snapshot_bw.dump
 train_test_depth.py
+
+# Ignore all config files except templates/splits we want tracked.
+configs/**
+!configs/*example*
+!configs/*dtu_splits*

@@ -18,6 +18,8 @@ import trimesh
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
+
+from scene.appearance_network import AppearanceNetwork
 from utils.general_utils import (
     build_rotation,
     build_scaling_rotation,
@@ -28,8 +30,6 @@ from utils.general_utils import (
 from utils.graphics_utils import BasicPointCloud
 from utils.sh_utils import RGB2SH
 from utils.system_utils import mkdir_p
-
-from scene.appearance_network import AppearanceNetwork
 
 
 class GaussianModel:
@@ -67,6 +67,11 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self._gaussianpop_error = torch.empty(0)
+        self._gaussianpop_per_view_errors = []  # List of per-view error tensors
+        self._gaussianpop_per_view_visibility = []  # List of per-view visibility tensors
+        self._gpop_agg_method = "sum"
+        self._gpop_agg_params = {}
+        self._gpop_visibility_mode = "all_views"
         self.setup_functions()
         # appearance network and appearance embedding
         # this module is adopted from GOF
@@ -184,18 +189,120 @@ class GaussianModel:
     def get_gaussianpop_error(self):
         return self._gaussianpop_error
 
+    def set_gaussianpop_aggregation(self, method: str, params: dict = None, visibility_mode: str = "all_views"):
+        """Set the aggregation method and parameters for error scoring."""
+        self._gpop_agg_method = method
+        self._gpop_agg_params = params or {}
+        self._gpop_visibility_mode = visibility_mode or "all_views"
+
     @torch.no_grad()
     def reset_gaussianpop_error(self):
+        """Reset per-view error list for new pruning round."""
+        self._gaussianpop_per_view_errors = []
+        self._gaussianpop_per_view_visibility = []
+        # Keep legacy scalar for backward compat if needed
         self._gaussianpop_error = torch.zeros((self.get_xyz.shape[0]), dtype=torch.float32, device="cuda")
 
     @torch.no_grad()
-    def accumulate_gaussianpop_error(self, gaussian_error):
-        if self._gaussianpop_error.numel() != self.get_xyz.shape[0]:
-            self.reset_gaussianpop_error()
-        self._gaussianpop_error += gaussian_error
+    def accumulate_gaussianpop_error(self, gaussian_error, visibility_filter=None):
+        """Store per-view error tensor (one column of the future 2D matrix)."""
+        if gaussian_error.numel() != self.get_xyz.shape[0]:
+            raise ValueError(
+                f"gaussian_error shape {gaussian_error.shape} does not match Gaussian count {self.get_xyz.shape[0]}"
+            )
+        if visibility_filter is None:
+            visibility_filter = torch.ones_like(gaussian_error, dtype=torch.bool)
+        if visibility_filter.numel() != self.get_xyz.shape[0]:
+            raise ValueError(
+                f"visibility_filter shape {visibility_filter.shape} does not match Gaussian count {self.get_xyz.shape[0]}"
+            )
+        # Store on CPU to save VRAM during accumulation
+        self._gaussianpop_per_view_errors.append(gaussian_error.cpu())
+        self._gaussianpop_per_view_visibility.append(visibility_filter.to(dtype=torch.bool).cpu())
+
+    @torch.no_grad()
+    def _aggregate_per_view_errors(self):
+        """Apply aggregation method to per-view error matrix."""
+        if not self._gaussianpop_per_view_errors:
+            return torch.zeros((self.get_xyz.shape[0]), dtype=torch.float32, device="cuda")
+
+        # Stack to 2D on CPU: (n_gaussians, n_views) — too large for VRAM with many Gaussians/views
+        error_matrix = torch.stack(self._gaussianpop_per_view_errors, dim=1)  # CPU (M, V)
+        vis_matrix = torch.stack(self._gaussianpop_per_view_visibility, dim=1)  # CPU (M, V)
+        use_visible_only = self._gpop_visibility_mode.lower() == "visible_only"
+        method = self._gpop_agg_method.lower()
+        min_visible_views = int(self._gpop_agg_params.get("min_visible_views", 0))
+
+        if use_visible_only:
+            vis_count = vis_matrix.sum(dim=1)
+            has_vis = vis_count > 0
+            masked_error = error_matrix.masked_fill(~vis_matrix, float("nan"))
+            masked_error_non_nan = torch.nan_to_num(masked_error, nan=0.0)
+        else:
+            has_vis = torch.ones((error_matrix.shape[0],), dtype=torch.bool)
+            vis_count = torch.full((error_matrix.shape[0],), error_matrix.shape[1], dtype=torch.long)
+            masked_error = error_matrix
+            masked_error_non_nan = error_matrix
+
+        force_low_mask = use_visible_only and min_visible_views > 0
+
+        def finalize_scores(out_cpu):
+            out_cpu = torch.where(has_vis, out_cpu, torch.zeros_like(out_cpu))
+            if force_low_mask:
+                low_vis = vis_count < min_visible_views
+                if torch.any(low_vis):
+                    out_cpu = out_cpu.clone()
+                    out_cpu[low_vis] = -1.0e12
+            return out_cpu.to("cuda")
+
+        if method == "sum":
+            out = masked_error_non_nan.sum(dim=1)
+            return finalize_scores(out)
+        elif method == "max":
+            if use_visible_only:
+                out = masked_error.nan_to_num(nan=float("-inf")).max(dim=1)[0]
+                return finalize_scores(out)
+            return finalize_scores(error_matrix.max(dim=1)[0])
+        elif method == "median":
+            if use_visible_only:
+                out = torch.nanmedian(masked_error, dim=1)[0]
+                return finalize_scores(torch.nan_to_num(out, nan=0.0))
+            return finalize_scores(error_matrix.median(dim=1)[0])
+        elif method == "topk_mean":
+            # Top-k% mean: take highest k% of errors per Gaussian and average them
+            k_percent = float(self._gpop_agg_params.get("k_percent", 50.0))
+            if use_visible_only:
+                k_per_row = torch.ceil(vis_count.float() * (k_percent / 100.0)).long()
+                k_per_row = torch.clamp(k_per_row, min=1)
+                max_k = int(k_per_row.max().item())
+                sorted_vals = torch.sort(masked_error.nan_to_num(nan=float("-inf")), dim=1, descending=True)[0]
+                top_vals = sorted_vals[:, :max_k]
+                col_idx = torch.arange(max_k).unsqueeze(0)
+                valid = col_idx < k_per_row.unsqueeze(1)
+                out = torch.where(valid, top_vals, torch.zeros_like(top_vals)).sum(dim=1) / k_per_row.float()
+                return finalize_scores(out)
+            k_percent_local = float(self._gpop_agg_params.get("k_percent", 50.0))
+            k = max(1, int(error_matrix.shape[1] * k_percent_local / 100.0))
+            topk_vals = torch.topk(error_matrix, k=k, dim=1, largest=True)[0]
+            return finalize_scores(topk_vals.mean(dim=1))
+        elif method == "lp_norm":
+            # L_p norm: (sum(|x|^p))^(1/p)
+            p = float(self._gpop_agg_params.get("p", 2.0))
+            if p == float("inf"):
+                if use_visible_only:
+                    out = masked_error.abs().nan_to_num(nan=float("-inf")).max(dim=1)[0]
+                    return finalize_scores(out)
+                return finalize_scores(error_matrix.abs().max(dim=1)[0])
+            out = (masked_error_non_nan.abs() ** p).sum(dim=1) ** (1.0 / p)
+            return finalize_scores(out)
+        else:
+            # Default to sum
+            out = masked_error_non_nan.sum(dim=1)
+            return finalize_scores(out)
 
     @torch.no_grad()
     def prune_by_gaussianpop_ratio(self, prune_ratio):
+        """Prune Gaussians by aggregated error score."""
         prune_ratio = float(prune_ratio)
         if prune_ratio <= 0.0 or self.get_xyz.shape[0] == 0:
             return 0
@@ -203,7 +310,11 @@ class GaussianModel:
         if n_prune <= 0:
             return 0
 
-        ids = torch.topk(self._gaussianpop_error, k=n_prune, largest=False).indices
+        # Aggregate errors using configured method
+        aggregated_error = self._aggregate_per_view_errors()
+
+        # Prune lowest-scoring Gaussians
+        ids = torch.topk(aggregated_error, k=n_prune, largest=False).indices
         prune_mask = torch.zeros((self.get_xyz.shape[0]), device="cuda", dtype=torch.bool)
         prune_mask[ids] = True
         self.prune_points(prune_mask)
