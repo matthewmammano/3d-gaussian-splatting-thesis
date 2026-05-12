@@ -1,0 +1,41 @@
+{
+  "experiment_name": "smoke_disk_safe_posttrain_20260512",
+  "output_root": "output",
+  "output_dir": "output/20260512_smoke_disk_safe_posttrain",
+  "selection": {
+    "mode": "scene_list",
+    "dataset_root": "/home/mvv/projects/datasets/tnt-preprocessed/TNT_GOF/TrainingSet",
+    "scenes": ["Truck"]
+  },
+  "defaults": {
+    "iterations": 30000,
+    "resolution": 2,
+    "use_decoupled_appearance": false,
+    "eval": true,
+    "save_every": 999999999,
+    "checkpoint_every": 999999999
+  },
+  "execution": {
+    "skip_existing": false
+  },
+  "steps": [
+    {
+      "id": "smoke_p01_topk2_min5",
+      "mode": "posttrain_gpop",
+      "description": "Tiny two-cycle smoke test for external source, transient cleanup, and final-only output.",
+      "source_model_dir": "output/20260421_103432-tnt_image_dev/optimize/baseline_30k_no_gpop/dev_scenes/Truck/default/model",
+      "source_iteration": 30000,
+      "c_cycles": 2,
+      "prune_ratio_mode": "total_across_cycles",
+      "cycle_prune_ratio": 0.01,
+      "views_per_quant": 1,
+      "fine_tune_iterations": 1,
+      "gpop": {
+        "error_agg_method": "topk_mean",
+        "error_topk_percent": 2,
+        "error_visibility_mode": "visible_only",
+        "error_min_visible_views": 5
+      }
+    }
+  ]
+}

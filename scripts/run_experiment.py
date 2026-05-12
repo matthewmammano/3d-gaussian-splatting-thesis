@@ -101,6 +101,15 @@ def _resolve_checkpoint(step_cfg: Dict, scene_key: Tuple[str, str], artifacts: D
     return str(ckpt)
 
 
+def _resolve_external_source_model_dir(step_cfg: Dict, group: str, scene: str) -> Path | None:
+    source = step_cfg.get("source_model_dir") or step_cfg.get("source_model_dirs")
+    if not source:
+        return None
+    if isinstance(source, dict):
+        source = source.get(f"{group}/{scene}") or source.get(scene) or source.get(group) or source.get("default")
+    return Path(source) if source else None
+
+
 def _posttrain_gpop_overrides(step_cfg: Dict) -> Dict:
     """Collect optional GaussianPOP aggregation overrides for post-train cycles.
 
@@ -291,9 +300,9 @@ def run_posttrain_gpop_step(
     global_log_path: Path,
 ):
     step_id = step_cfg["id"]
-    src_step = step_cfg["from_step_id"]
+    src_step = step_cfg.get("from_step_id")
     src_variant = step_cfg.get("from_variant", "default")
-    src_iteration = int(step_cfg.get("from_iteration", 30000))
+    src_iteration = int(step_cfg.get("from_iteration", step_cfg.get("source_iteration", 30000)))
     c_cycles = int(step_cfg.get("c_cycles", 8))
     prune_ratio_mode = step_cfg.get("prune_ratio_mode", "total_across_cycles")
     cycle_prune_ratio = float(step_cfg.get("cycle_prune_ratio", 0.9))
@@ -310,15 +319,34 @@ def run_posttrain_gpop_step(
         raise ValueError(f"Unknown prune_ratio_mode: {prune_ratio_mode}. Use 'total_across_cycles' or 'per_cycle'.")
 
     for group, scene, scene_path in jobs:
-        src_key = _artifact_key(src_step, src_variant, group, scene)
-        if src_key not in artifacts:
-            with open(global_log_path, "a", encoding="utf-8") as glog:
-                glog.write(
-                    f"[{datetime.now().isoformat()}] WARN posttrain skipping {step_id}/{group}/{scene}: source artifact missing ({src_key})\n"
-                )
-            continue
+        if src_step:
+            src_key = _artifact_key(src_step, src_variant, group, scene)
+            if src_key not in artifacts:
+                with open(global_log_path, "a", encoding="utf-8") as glog:
+                    glog.write(
+                        f"[{datetime.now().isoformat()}] WARN posttrain skipping {step_id}/{group}/{scene}: source artifact missing ({src_key})\n"
+                    )
+                continue
+            src_model_dir = Path(artifacts[src_key]["model_dir"])
+            source_status = {
+                "step_id": src_step,
+                "variant": src_variant,
+                "checkpoint_iteration": src_iteration,
+                "model_dir": str(src_model_dir),
+            }
+        else:
+            src_model_dir = _resolve_external_source_model_dir(step_cfg, group, scene)
+            if src_model_dir is None:
+                with open(global_log_path, "a", encoding="utf-8") as glog:
+                    glog.write(
+                        f"[{datetime.now().isoformat()}] WARN posttrain skipping {step_id}/{group}/{scene}: missing from_step_id or source_model_dir\n"
+                    )
+                continue
+            source_status = {
+                "checkpoint_iteration": src_iteration,
+                "model_dir": str(src_model_dir),
+            }
 
-        src_model_dir = Path(artifacts[src_key]["model_dir"])
         src_ckpt = src_model_dir / f"chkpnt{src_iteration}.pth"
         if not src_ckpt.exists():
             with open(global_log_path, "a", encoding="utf-8") as glog:
@@ -348,8 +376,7 @@ def run_posttrain_gpop_step(
                         "group": group,
                         "scene": scene,
                         "status": "skipped_existing",
-                        "source_step": src_step,
-                        "source_variant": src_variant,
+                        "source": source_status,
                     },
                 )
             artifact_entry = {"model_dir": str(model_dir)}
@@ -482,11 +509,7 @@ def run_posttrain_gpop_step(
             "group": group,
             "scene": scene,
             "status": "ok" if ok else "failed",
-            "source": {
-                "step_id": src_step,
-                "variant": src_variant,
-                "checkpoint_iteration": src_iteration,
-            },
+            "source": source_status,
             "prune_ratio_mode": prune_ratio_mode,
             "source_gaussians": source_gaussians,
             "target_total_pruned": target_total_pruned,
@@ -539,12 +562,16 @@ def execute_steps(config: Dict, run_root: Path):
 def main():
     parser = argparse.ArgumentParser(description="Unified experiment runner")
     parser.add_argument("--config", required=True, type=str, help="Path to experiment JSON")
+    parser.add_argument("--output-dir", type=str, default=None, help="Override config output_dir for this run")
     args = parser.parse_args()
 
     config = read_json(args.config)
     exp_name = config["experiment_name"]
     output_root = Path(config.get("output_root", "output"))
-    if "output_dir" in config:
+    if args.output_dir:
+        run_root = Path(args.output_dir)
+        config["output_dir"] = str(run_root)
+    elif "output_dir" in config:
         run_root = Path(config["output_dir"])
     else:
         run_root = output_root / f"{now_tag()}-{exp_name}"
