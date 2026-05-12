@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from scripts.comparison_panel_utils import gaussian_blur, generate_prediction_comparison
+
 
 def now_tag() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -343,7 +345,15 @@ def run_render_metric(
     }
 
 
-def visualize_high_error(model_path: str, out_dir: Path, iteration: int, top_percent: float = 5.0) -> Dict:
+def visualize_high_error(
+    model_path: str,
+    out_dir: Path,
+    iteration: int,
+    top_percent: float = 5.0,
+    worst_count: int = 12,
+    threshold_percentile: float = 92.0,
+    blur_radius: float = 1.6,
+) -> Dict:
     import numpy as np
     from PIL import Image
 
@@ -371,38 +381,84 @@ def visualize_high_error(model_path: str, out_dir: Path, iteration: int, top_per
         thr = float(np.quantile(err, 1.0 - top_percent / 100.0))
         mask = err >= thr
 
-        # Build a standalone heatmap rather than blending on top of the
-        # rendered image, which makes spatial error patterns easier to inspect.
-        scale = max(float(np.quantile(err, 0.995)), 1e-6)
-        err_norm = np.clip(err / scale, 0.0, 1.0)
-
-        heat = np.zeros_like(r)
-        heat[..., 0] = np.clip(err_norm * 2.0, 0.0, 1.0)
-        heat[..., 1] = np.clip((err_norm - 0.5) * 2.0, 0.0, 1.0)
-
-        panel = np.concatenate([g, r, heat], axis=1)
-        Image.fromarray((panel * 255.0).astype(np.uint8)).save(overlays / name)
-
         per_image.append(
             {
                 "image": name,
                 "mae": float(err.mean()),
+                "worst5pct_mae": float(
+                    np.partition(err.reshape(-1), max(0, err.size - max(1, err.size // 20)))[
+                        -max(1, err.size // 20):
+                    ].mean()
+                ),
                 "high_error_threshold": thr,
                 "high_error_ratio": float(mask.mean()),
                 "high_error_mean": float(err[mask].mean()) if np.any(mask) else 0.0,
             }
         )
 
+    selected = sorted(per_image, key=lambda item: item["worst5pct_mae"], reverse=True)[: max(1, worst_count)]
+    global_scale = 1e-6
+    for item in selected:
+        r = np.asarray(Image.open(renders_dir / item["image"]).convert("RGB"), dtype=np.float32) / 255.0
+        g = np.asarray(Image.open(gt_dir / item["image"]).convert("RGB"), dtype=np.float32) / 255.0
+        err = np.abs(r - g).mean(axis=2)
+        global_scale = max(global_scale, float(np.percentile(err, 98)))
+
+    for item in selected:
+        name = item["image"]
+        r = np.asarray(Image.open(renders_dir / name).convert("RGB"), dtype=np.float32) / 255.0
+        g = np.asarray(Image.open(gt_dir / name).convert("RGB"), dtype=np.float32) / 255.0
+        err = np.abs(r - g).mean(axis=2)
+        blurred = gaussian_blur(err, blur_radius)
+        threshold = max(float(np.percentile(blurred, threshold_percentile)), global_scale * 0.08)
+        intensity = np.clip((blurred - threshold) / max(global_scale - threshold, 1e-6), 0.0, 1.0)
+        heat = np.zeros(r.shape, dtype=np.float32)
+        heat[..., 0] = 0.90 * intensity
+        heat[..., 1] = 0.62 * intensity
+        heat[..., 2] = 0.00
+        panel = np.concatenate([g, r, heat], axis=1)
+        Image.fromarray((np.clip(panel, 0, 1) * 255.0).astype(np.uint8)).save(overlays / name)
+
     summary = {
         "model_path": model_path,
         "method_dir": str(method_dir),
         "top_percent": top_percent,
-        "images": len(per_image),
+        "images": len(selected),
+        "total_images": len(per_image),
+        "worst_count": worst_count,
+        "threshold_percentile": threshold_percentile,
+        "blur_radius": blur_radius,
         "mean_mae": float(np.mean([x["mae"] for x in per_image])) if per_image else None,
-        "per_image": per_image,
+        "per_image": selected,
     }
     write_json(out_dir / "summary.json", summary)
     return summary
+
+
+def generate_model_comparison(
+    reference_model_path: str,
+    reference_iteration: int,
+    candidate_model_path: str,
+    candidate_iteration: int,
+    out_dir: Path,
+    reference_label: str,
+    candidate_label: str,
+    worst_count: int = 12,
+    threshold_percentile: float = 92.0,
+    blur_radius: float = 1.6,
+) -> Dict:
+    return generate_prediction_comparison(
+        reference_base=Path(reference_model_path) / "test" / f"ours_{reference_iteration}",
+        candidate_base=Path(candidate_model_path) / "test" / f"ours_{candidate_iteration}",
+        out_dir=out_dir,
+        reference_label=reference_label,
+        candidate_label=candidate_label,
+        reference_iter=reference_iteration,
+        candidate_iter=candidate_iteration,
+        worst_count=worst_count,
+        threshold_percentile=threshold_percentile,
+        blur_radius=blur_radius,
+    )
 
 
 def write_run_manifest(run_root: Path, config: Dict) -> None:

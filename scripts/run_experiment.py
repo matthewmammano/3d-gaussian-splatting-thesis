@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts._core import (
     build_train_command,
     ensure_dir,
+    generate_model_comparison,
     now_tag,
     read_json,
     resolve_scene_jobs,
@@ -62,7 +63,9 @@ def _read_last_pruned_count(stdout_log_path: Path) -> int | None:
     return last
 
 
-def _remove_transient_training_artifacts(model_dir: Path, iteration: int, global_log_path: Path | None = None) -> None:
+def _remove_transient_training_artifacts(
+    model_dir: Path, iteration: int, global_log_path: Path | None = None
+) -> None:
     """Remove per-cycle artifacts after a later checkpoint has superseded them."""
     paths = [
         model_dir / f"chkpnt{iteration}.pth",
@@ -84,7 +87,9 @@ def _remove_transient_training_artifacts(model_dir: Path, iteration: int, global
                     )
 
 
-def _resolve_checkpoint(step_cfg: Dict, scene_key: Tuple[str, str], artifacts: Dict) -> str | None:
+def _resolve_checkpoint(
+    step_cfg: Dict, scene_key: Tuple[str, str], artifacts: Dict
+) -> str | None:
     resume = step_cfg.get("resume_from")
     if not resume:
         return None
@@ -101,13 +106,32 @@ def _resolve_checkpoint(step_cfg: Dict, scene_key: Tuple[str, str], artifacts: D
     return str(ckpt)
 
 
-def _resolve_external_source_model_dir(step_cfg: Dict, group: str, scene: str) -> Path | None:
+def _resolve_external_source_model_dir(
+    step_cfg: Dict, group: str, scene: str
+) -> Path | None:
     source = step_cfg.get("source_model_dir") or step_cfg.get("source_model_dirs")
     if not source:
         return None
     if isinstance(source, dict):
-        source = source.get(f"{group}/{scene}") or source.get(scene) or source.get(group) or source.get("default")
+        source = (
+            source.get(f"{group}/{scene}")
+            or source.get(scene)
+            or source.get(group)
+            or source.get("default")
+        )
     return Path(source) if source else None
+
+
+def _symlink_existing(src: Path, dst: Path) -> None:
+    src = src.resolve()
+    if not src.exists():
+        raise FileNotFoundError(src)
+    ensure_dir(dst.parent)
+    if dst.exists() or dst.is_symlink():
+        if dst.resolve() == src:
+            return
+        raise FileExistsError(f"Refusing to replace existing path: {dst}")
+    dst.symlink_to(src, target_is_directory=src.is_dir())
 
 
 def _posttrain_gpop_overrides(step_cfg: Dict) -> Dict:
@@ -153,7 +177,9 @@ def run_optimize_step(
     global_log_path: Path,
 ):
     step_id = step_cfg["id"]
-    variants = step_cfg.get("variants", [{"name": "default", "phases": step_cfg.get("phases", [])}])
+    variants = step_cfg.get(
+        "variants", [{"name": "default", "phases": step_cfg.get("phases", [])}]
+    )
 
     for group, scene, scene_path in jobs:
         for variant in variants:
@@ -162,7 +188,10 @@ def run_optimize_step(
             model_dir = job_dir / "model"
             ensure_dir(model_dir)
 
-            if execution.get("skip_existing", False) and (model_dir / "point_cloud").exists():
+            if (
+                execution.get("skip_existing", False)
+                and (model_dir / "point_cloud").exists()
+            ):
                 status = {
                     "step": step_id,
                     "variant": variant_name,
@@ -171,13 +200,22 @@ def run_optimize_step(
                     "status": "skipped_existing",
                 }
                 write_json(job_dir / "status.json", status)
-                artifacts[_artifact_key(step_id, variant_name, group, scene)] = {"model_dir": str(model_dir)}
+                artifacts[_artifact_key(step_id, variant_name, group, scene)] = {
+                    "model_dir": str(model_dir)
+                }
                 continue
 
             phase_results = []
             for i, phase in enumerate(variant.get("phases", []), start=1):
                 if phase.get("op", "train") != "train":
-                    phase_results.append({"phase_index": i, "op": phase.get("op"), "rc": 0, "note": "ignored"})
+                    phase_results.append(
+                        {
+                            "phase_index": i,
+                            "op": phase.get("op"),
+                            "rc": 0,
+                            "note": "ignored",
+                        }
+                    )
                     continue
 
                 phase_local = dict(phase)
@@ -186,16 +224,28 @@ def run_optimize_step(
                     phase_local["start_checkpoint"] = ckpt
 
                 cmd = build_train_command(
-                    scene_path=scene_path, model_path=str(model_dir), phase=phase_local, defaults=defaults
+                    scene_path=scene_path,
+                    model_path=str(model_dir),
+                    phase=phase_local,
+                    defaults=defaults,
                 )
-                rc = run_logged_command(cmd, job_dir, f"phase_{i}_train", global_log_path=global_log_path)
+                rc = run_logged_command(
+                    cmd, job_dir, f"phase_{i}_train", global_log_path=global_log_path
+                )
                 phase_results.append(
-                    {"phase_index": i, "op": "train", "rc": rc, "checkpoint": phase_local.get("start_checkpoint")}
+                    {
+                        "phase_index": i,
+                        "op": "train",
+                        "rc": rc,
+                        "checkpoint": phase_local.get("start_checkpoint"),
+                    }
                 )
                 if rc != 0:
                     break
 
-            ok = all(x.get("rc", 1) == 0 for x in phase_results if x.get("op") == "train")
+            ok = all(
+                x.get("rc", 1) == 0 for x in phase_results if x.get("op") == "train"
+            )
             status = {
                 "step": step_id,
                 "variant": variant_name,
@@ -209,11 +259,17 @@ def run_optimize_step(
             write_json(job_dir / "status.json", status)
 
             if ok:
-                artifacts[_artifact_key(step_id, variant_name, group, scene)] = {"model_dir": str(model_dir)}
+                artifacts[_artifact_key(step_id, variant_name, group, scene)] = {
+                    "model_dir": str(model_dir)
+                }
 
 
 def run_evaluate_step(
-    step_cfg: Dict, run_root: Path, jobs: List[Tuple[str, str, str]], artifacts: Dict, global_log_path: Path
+    step_cfg: Dict,
+    run_root: Path,
+    jobs: List[Tuple[str, str, str]],
+    artifacts: Dict,
+    global_log_path: Path,
 ):
     step_id = step_cfg["id"]
     src_step = step_cfg["from_step_id"]
@@ -255,6 +311,86 @@ def run_evaluate_step(
         write_json(job_dir / "status.json", status)
 
 
+def run_external_model_step(
+    step_cfg: Dict,
+    run_root: Path,
+    jobs: List[Tuple[str, str, str]],
+    artifacts: Dict,
+    global_log_path: Path,
+):
+    step_id = step_cfg["id"]
+    variant = step_cfg.get("variant_name", "default")
+    iteration = int(step_cfg.get("iteration", step_cfg.get("source_iteration", 30000)))
+
+    for group, scene, _scene_path in jobs:
+        model_dir = _resolve_external_source_model_dir(step_cfg, group, scene)
+        if model_dir is None:
+            with open(global_log_path, "a", encoding="utf-8") as glog:
+                glog.write(
+                    f"[{datetime.now().isoformat()}] WARN external_model skipping {step_id}/{group}/{scene}: missing source_model_dir\n"
+                )
+            continue
+        source_model_dir = model_dir
+        ckpt = source_model_dir / f"chkpnt{iteration}.pth"
+        ply = (
+            source_model_dir
+            / "point_cloud"
+            / f"iteration_{iteration}"
+            / "point_cloud.ply"
+        )
+        cfg_args = source_model_dir / "cfg_args"
+        if not ckpt.exists():
+            with open(global_log_path, "a", encoding="utf-8") as glog:
+                glog.write(
+                    f"[{datetime.now().isoformat()}] WARN external_model skipping {step_id}/{group}/{scene}: missing checkpoint {ckpt}\n"
+                )
+            continue
+        if not ply.exists() or not cfg_args.exists():
+            with open(global_log_path, "a", encoding="utf-8") as glog:
+                glog.write(
+                    f"[{datetime.now().isoformat()}] WARN external_model skipping {step_id}/{group}/{scene}: missing required baseline files ply={ply.exists()} cfg_args={cfg_args.exists()}\n"
+                )
+            continue
+
+        if bool(step_cfg.get("link_into_run", True)):
+            job_dir = run_root / "external_model" / step_id / group / scene / variant
+            linked_model_dir = job_dir / "model"
+            _symlink_existing(ckpt, linked_model_dir / f"chkpnt{iteration}.pth")
+            _symlink_existing(cfg_args, linked_model_dir / "cfg_args")
+            _symlink_existing(
+                ply,
+                linked_model_dir
+                / "point_cloud"
+                / f"iteration_{iteration}"
+                / "point_cloud.ply",
+            )
+            for name in ("cameras.json", "input.ply", f"chkpnt{iteration}.txt"):
+                src = source_model_dir / name
+                if src.exists():
+                    _symlink_existing(src, linked_model_dir / name)
+            model_dir = linked_model_dir
+            write_json(
+                job_dir / "status.json",
+                {
+                    "step": step_id,
+                    "variant": variant,
+                    "group": group,
+                    "scene": scene,
+                    "status": "ok",
+                    "source_model_dir": str(source_model_dir),
+                    "model_dir": str(model_dir),
+                    "final_iteration": iteration,
+                    "link_into_run": True,
+                },
+            )
+
+        artifacts[_artifact_key(step_id, variant, group, scene)] = {
+            "model_dir": str(model_dir),
+            "source_model_dir": str(source_model_dir),
+            "final_iteration": iteration,
+        }
+
+
 def run_analyze_step(
     step_cfg: Dict,
     run_root: Path,
@@ -267,10 +403,15 @@ def run_analyze_step(
     src_variant = step_cfg.get("from_variant", "default")
     iteration = int(step_cfg.get("iteration", 30000))
     top_percent = float(step_cfg.get("top_percent", 5.0))
+    worst_count = int(step_cfg.get("worst_count", 12))
+    threshold_percentile = float(step_cfg.get("threshold_percentile", 92.0))
+    blur_radius = float(step_cfg.get("blur_radius", 1.6))
 
     for group, scene, _scene_path in jobs:
         with open(global_log_path, "a", encoding="utf-8") as glog:
-            glog.write(f"[{datetime.now().isoformat()}] ANALYZE_START step={step_id} group={group} scene={scene}\n")
+            glog.write(
+                f"[{datetime.now().isoformat()}] ANALYZE_START step={step_id} group={group} scene={scene}\n"
+            )
         k = _artifact_key(src_step, src_variant, group, scene)
         if k not in artifacts:
             with open(global_log_path, "a", encoding="utf-8") as glog:
@@ -283,11 +424,85 @@ def run_analyze_step(
         job_dir = run_root / "analyze" / step_id / group / scene / src_variant
         ensure_dir(job_dir)
         summary = visualize_high_error(
-            model_path=model_dir, out_dir=job_dir, iteration=iteration, top_percent=top_percent
+            model_path=model_dir,
+            out_dir=job_dir,
+            iteration=iteration,
+            top_percent=top_percent,
+            worst_count=worst_count,
+            threshold_percentile=threshold_percentile,
+            blur_radius=blur_radius,
         )
-        write_json(job_dir / "status.json", {"step": step_id, "group": group, "scene": scene, "summary": summary})
+        write_json(
+            job_dir / "status.json",
+            {"step": step_id, "group": group, "scene": scene, "summary": summary},
+        )
         with open(global_log_path, "a", encoding="utf-8") as glog:
-            glog.write(f"[{datetime.now().isoformat()}] ANALYZE_END step={step_id} group={group} scene={scene}\n")
+            glog.write(
+                f"[{datetime.now().isoformat()}] ANALYZE_END step={step_id} group={group} scene={scene}\n"
+            )
+
+
+def run_compare_step(
+    step_cfg: Dict,
+    run_root: Path,
+    jobs: List[Tuple[str, str, str]],
+    artifacts: Dict,
+    global_log_path: Path,
+):
+    step_id = step_cfg["id"]
+    candidate_step = step_cfg["from_step_id"]
+    candidate_variant = step_cfg.get("from_variant", "default")
+    reference_step = step_cfg["reference_step_id"]
+    reference_variant = step_cfg.get("reference_variant", "default")
+    worst_count = int(step_cfg.get("worst_count", 12))
+    threshold_percentile = float(step_cfg.get("threshold_percentile", 92.0))
+    blur_radius = float(step_cfg.get("blur_radius", 1.6))
+
+    for group, scene, _scene_path in jobs:
+        candidate_key = _artifact_key(candidate_step, candidate_variant, group, scene)
+        reference_key = _artifact_key(reference_step, reference_variant, group, scene)
+        if candidate_key not in artifacts or reference_key not in artifacts:
+            with open(global_log_path, "a", encoding="utf-8") as glog:
+                glog.write(
+                    f"[{datetime.now().isoformat()}] WARN compare skipping {step_id}/{group}/{scene}: missing artifact candidate={candidate_key in artifacts} reference={reference_key in artifacts}\n"
+                )
+            continue
+
+        candidate = artifacts[candidate_key]
+        reference = artifacts[reference_key]
+        candidate_iteration = int(
+            step_cfg.get("iteration", candidate.get("final_iteration", 30000))
+        )
+        reference_iteration = int(
+            step_cfg.get("reference_iteration", reference.get("final_iteration", 30000))
+        )
+        job_dir = run_root / "compare" / step_id / group / scene / candidate_variant
+        ensure_dir(job_dir)
+        summary = generate_model_comparison(
+            reference_model_path=str(reference["model_dir"]),
+            reference_iteration=reference_iteration,
+            candidate_model_path=str(candidate["model_dir"]),
+            candidate_iteration=candidate_iteration,
+            out_dir=job_dir,
+            reference_label=str(step_cfg.get("reference_label", reference_step)),
+            candidate_label=str(step_cfg.get("candidate_label", candidate_step)),
+            worst_count=worst_count,
+            threshold_percentile=threshold_percentile,
+            blur_radius=blur_radius,
+        )
+        write_json(
+            job_dir / "status.json",
+            {
+                "step": step_id,
+                "group": group,
+                "scene": scene,
+                "candidate_step": candidate_step,
+                "reference_step": reference_step,
+                "candidate_iteration": candidate_iteration,
+                "reference_iteration": reference_iteration,
+                "summary": summary,
+            },
+        )
 
 
 def run_posttrain_gpop_step(
@@ -302,7 +517,9 @@ def run_posttrain_gpop_step(
     step_id = step_cfg["id"]
     src_step = step_cfg.get("from_step_id")
     src_variant = step_cfg.get("from_variant", "default")
-    src_iteration = int(step_cfg.get("from_iteration", step_cfg.get("source_iteration", 30000)))
+    src_iteration = int(
+        step_cfg.get("from_iteration", step_cfg.get("source_iteration", 30000))
+    )
     c_cycles = int(step_cfg.get("c_cycles", 8))
     prune_ratio_mode = step_cfg.get("prune_ratio_mode", "total_across_cycles")
     cycle_prune_ratio = float(step_cfg.get("cycle_prune_ratio", 0.9))
@@ -310,13 +527,18 @@ def run_posttrain_gpop_step(
     views_per_quant = int(step_cfg.get("views_per_quant", 0))
     fine_tune_iterations = int(step_cfg.get("fine_tune_iterations", 5000))
     keep_intermediate_checkpoints = bool(
-        step_cfg.get("keep_intermediate_checkpoints", defaults.get("keep_intermediate_checkpoints", False))
+        step_cfg.get(
+            "keep_intermediate_checkpoints",
+            defaults.get("keep_intermediate_checkpoints", False),
+        )
     )
     output_variant = step_cfg.get("variant_name", "default")
     gpop_overrides = _posttrain_gpop_overrides(step_cfg)
 
     if prune_ratio_mode not in {"total_across_cycles", "per_cycle"}:
-        raise ValueError(f"Unknown prune_ratio_mode: {prune_ratio_mode}. Use 'total_across_cycles' or 'per_cycle'.")
+        raise ValueError(
+            f"Unknown prune_ratio_mode: {prune_ratio_mode}. Use 'total_across_cycles' or 'per_cycle'."
+        )
 
     for group, scene, scene_path in jobs:
         if src_step:
@@ -359,7 +581,10 @@ def run_posttrain_gpop_step(
         model_dir = job_dir / "model"
         ensure_dir(model_dir)
 
-        if execution.get("skip_existing", False) and (model_dir / "point_cloud").exists():
+        if (
+            execution.get("skip_existing", False)
+            and (model_dir / "point_cloud").exists()
+        ):
             existing_status = {}
             status_path = job_dir / "status.json"
             if status_path.exists():
@@ -379,29 +604,42 @@ def run_posttrain_gpop_step(
                         "source": source_status,
                     },
                 )
-            artifact_entry = {"model_dir": str(model_dir)}
+            artifact_entry: Dict[str, object] = {"model_dir": str(model_dir)}
             if "final_iteration" in existing_status:
                 artifact_entry["final_iteration"] = existing_status["final_iteration"]
             else:
                 # Infer final_iteration from the highest checkpoint in the model dir
                 import glob as _glob
+
                 ckpts = sorted(_glob.glob(str(model_dir / "chkpnt*.pth")))
                 if ckpts:
                     import re as _re
+
                     m = _re.search(r"chkpnt(\d+)\.pth$", ckpts[-1])
                     if m:
                         artifact_entry["final_iteration"] = int(m.group(1))
-            artifacts[_artifact_key(step_id, output_variant, group, scene)] = artifact_entry
+            artifacts[_artifact_key(step_id, output_variant, group, scene)] = (
+                artifact_entry
+            )
             continue
 
         current_iter = src_iteration
         current_ckpt = str(src_ckpt)
-        cycle_results = []
-        source_ply = src_model_dir / "point_cloud" / f"iteration_{src_iteration}" / "point_cloud.ply"
+        cycle_results: List[Dict[str, object]] = []
+        source_ply = (
+            src_model_dir
+            / "point_cloud"
+            / f"iteration_{src_iteration}"
+            / "point_cloud.ply"
+        )
         source_gaussians = _read_ply_vertex_count(source_ply)
         target_total_pruned = (
             int(source_gaussians * cycle_prune_ratio)
-            if (source_gaussians is not None and not cycle_prune_ratios and prune_ratio_mode == "total_across_cycles")
+            if (
+                source_gaussians is not None
+                and not cycle_prune_ratios
+                and prune_ratio_mode == "total_across_cycles"
+            )
             else None
         )
         actual_total_pruned = 0
@@ -416,15 +654,23 @@ def run_posttrain_gpop_step(
                 # total target P across all cycles and split pruning budget.
                 # Track counts from stdout so transient cycles do not need PLYs.
                 current_gaussians = (
-                    max(source_gaussians - actual_total_pruned, 0) if source_gaussians is not None else None
+                    max(source_gaussians - actual_total_pruned, 0)
+                    if source_gaussians is not None
+                    else None
                 )
 
-                if target_total_pruned is None or current_gaussians is None or current_gaussians <= 0:
+                if (
+                    target_total_pruned is None
+                    or current_gaussians is None
+                    or current_gaussians <= 0
+                ):
                     ratio = cycle_prune_ratio
                 else:
                     remaining_target = max(target_total_pruned - actual_total_pruned, 0)
                     remaining_cycles = c_cycles - cycle_idx + 1
-                    step_target_pruned = (remaining_target + remaining_cycles - 1) // remaining_cycles
+                    step_target_pruned = (
+                        remaining_target + remaining_cycles - 1
+                    ) // remaining_cycles
                     ratio = min(max(step_target_pruned / current_gaussians, 0.0), 1.0)
 
             target_iter = current_iter + 1
@@ -436,7 +682,7 @@ def run_posttrain_gpop_step(
                 "iterations": target_iter,
                 "start_checkpoint": current_ckpt,
                 "save_point_cloud": keep_cycle_outputs,
-                "run_tests": keep_cycle_outputs,
+                "run_tests": bool(step_cfg.get("run_cycle_tests", False)),
                 "checkpoint_iterations": [target_iter],
                 "gpop": {
                     "enabled": True,
@@ -446,8 +692,18 @@ def run_posttrain_gpop_step(
                     **gpop_overrides,
                 },
             }
-            cmd = build_train_command(scene_path=scene_path, model_path=str(model_dir), phase=phase, defaults=defaults)
-            rc = run_logged_command(cmd, job_dir, f"cycle_{cycle_idx}_prune", global_log_path=global_log_path)
+            cmd = build_train_command(
+                scene_path=scene_path,
+                model_path=str(model_dir),
+                phase=phase,
+                defaults=defaults,
+            )
+            rc = run_logged_command(
+                cmd,
+                job_dir,
+                f"cycle_{cycle_idx}_prune",
+                global_log_path=global_log_path,
+            )
             cycle_stdout_log = job_dir / f"cycle_{cycle_idx}_prune.stdout.log"
             pruned_count = _read_last_pruned_count(cycle_stdout_log)
             if pruned_count is not None:
@@ -469,12 +725,20 @@ def run_posttrain_gpop_step(
                 cycle_results[-1]["rc"] = 2
                 cycle_results[-1]["error"] = "expected cycle checkpoint missing"
                 break
-            if not keep_intermediate_checkpoints and Path(current_ckpt).parent == model_dir:
-                _remove_transient_training_artifacts(model_dir, current_iter, global_log_path)
+            if (
+                not keep_intermediate_checkpoints
+                and Path(current_ckpt).parent == model_dir
+            ):
+                _remove_transient_training_artifacts(
+                    model_dir, current_iter, global_log_path
+                )
             current_iter = target_iter
             current_ckpt = str(cycle_ckpt)
 
-        cycles_ok = all(x.get("rc", 1) == 0 for x in cycle_results) and len(cycle_results) == c_cycles
+        cycles_ok = (
+            all(x.get("rc", 1) == 0 for x in cycle_results)
+            and len(cycle_results) == c_cycles
+        )
 
         fine_tune_result = None
         if cycles_ok and fine_tune_iterations > 0:
@@ -484,12 +748,21 @@ def run_posttrain_gpop_step(
                 "iterations": ft_target,
                 "start_checkpoint": current_ckpt,
                 "train_args": step_cfg.get("fine_tune_train_args", {}),
-                "save_every": int(step_cfg.get("fine_tune_save_every", defaults.get("save_every", 999_999_999))),
+                "save_every": int(
+                    step_cfg.get(
+                        "fine_tune_save_every", defaults.get("save_every", 999_999_999)
+                    )
+                ),
             }
             ft_cmd = build_train_command(
-                scene_path=scene_path, model_path=str(model_dir), phase=ft_phase, defaults=defaults
+                scene_path=scene_path,
+                model_path=str(model_dir),
+                phase=ft_phase,
+                defaults=defaults,
             )
-            ft_rc = run_logged_command(ft_cmd, job_dir, "fine_tune", global_log_path=global_log_path)
+            ft_rc = run_logged_command(
+                ft_cmd, job_dir, "fine_tune", global_log_path=global_log_path
+            )
             ft_ckpt = model_dir / f"chkpnt{ft_target}.pth"
             fine_tune_result = {
                 "rc": ft_rc,
@@ -498,12 +771,19 @@ def run_posttrain_gpop_step(
                 "checkpoint": str(ft_ckpt),
             }
             if ft_rc == 0 and ft_ckpt.exists():
-                if not keep_intermediate_checkpoints and Path(current_ckpt).parent == model_dir:
-                    _remove_transient_training_artifacts(model_dir, current_iter, global_log_path)
+                if (
+                    not keep_intermediate_checkpoints
+                    and Path(current_ckpt).parent == model_dir
+                ):
+                    _remove_transient_training_artifacts(
+                        model_dir, current_iter, global_log_path
+                    )
                 current_iter = ft_target
                 current_ckpt = str(ft_ckpt)
 
-        ok = cycles_ok and (fine_tune_result is None or fine_tune_result.get("rc", 1) == 0)
+        ok = cycles_ok and (
+            fine_tune_result is None or fine_tune_result.get("rc", 1) == 0
+        )
         status = {
             "step": step_id,
             "group": group,
@@ -516,7 +796,9 @@ def run_posttrain_gpop_step(
             "actual_total_pruned": actual_total_pruned,
             "c_cycles": c_cycles,
             "cycles": cycle_results,
-            "post_prune_iteration": cycle_results[-1]["target_iteration"] if cycle_results else src_iteration,
+            "post_prune_iteration": cycle_results[-1]["target_iteration"]
+            if cycle_results
+            else src_iteration,
             "fine_tune": fine_tune_result,
             "final_checkpoint": current_ckpt,
             "final_iteration": current_iter,
@@ -542,27 +824,46 @@ def execute_steps(config: Dict, run_root: Path):
     for step in config["steps"]:
         mode = step["mode"]
         with open(global_log_path, "a", encoding="utf-8") as glog:
-            glog.write(f"[{datetime.now().isoformat()}] STEP_START id={step['id']} mode={mode}\n")
+            glog.write(
+                f"[{datetime.now().isoformat()}] STEP_START id={step['id']} mode={mode}\n"
+            )
         if mode == "optimize":
-            run_optimize_step(step, run_root, jobs, defaults, execution, artifacts, global_log_path)
+            run_optimize_step(
+                step, run_root, jobs, defaults, execution, artifacts, global_log_path
+            )
+        elif mode == "external_model":
+            run_external_model_step(step, run_root, jobs, artifacts, global_log_path)
         elif mode == "posttrain_gpop":
-            run_posttrain_gpop_step(step, run_root, jobs, defaults, execution, artifacts, global_log_path)
+            run_posttrain_gpop_step(
+                step, run_root, jobs, defaults, execution, artifacts, global_log_path
+            )
         elif mode == "evaluate":
             run_evaluate_step(step, run_root, jobs, artifacts, global_log_path)
         elif mode == "analyze":
             run_analyze_step(step, run_root, jobs, artifacts, global_log_path)
+        elif mode == "compare":
+            run_compare_step(step, run_root, jobs, artifacts, global_log_path)
         elif mode == "pipeline":
             continue
         else:
             raise ValueError(f"Unknown step mode: {mode}")
         with open(global_log_path, "a", encoding="utf-8") as glog:
-            glog.write(f"[{datetime.now().isoformat()}] STEP_END id={step['id']} mode={mode}\n")
+            glog.write(
+                f"[{datetime.now().isoformat()}] STEP_END id={step['id']} mode={mode}\n"
+            )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Unified experiment runner")
-    parser.add_argument("--config", required=True, type=str, help="Path to experiment JSON")
-    parser.add_argument("--output-dir", type=str, default=None, help="Override config output_dir for this run")
+    parser.add_argument(
+        "--config", required=True, type=str, help="Path to experiment JSON"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Override config output_dir for this run",
+    )
     args = parser.parse_args()
 
     config = read_json(args.config)

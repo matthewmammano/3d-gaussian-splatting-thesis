@@ -5,6 +5,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 OUT = Path('comparison_charts')
+BLUE = '#0072B2'
+ORANGE = '#E69F00'
+GREEN = '#009E73'
+VERMILLION = '#D55E00'
 
 
 def load_rows(csv_name: str):
@@ -25,8 +29,8 @@ def save_psnr_plot(rows, title: str, xlabel: str, out_name: str):
     test = [r['test_psnr'] for r in rows]
 
     plt.figure(figsize=(14, 5))
-    plt.plot(x, train, marker='o', label='Train PSNR')
-    plt.plot(x, test, marker='o', label='Test PSNR')
+    plt.plot(x, train, marker='o', color=BLUE, label='Train PSNR')
+    plt.plot(x, test, marker='s', color=ORANGE, label='Test PSNR')
     plt.xticks(rotation=35, ha='right')
     plt.title(title)
     plt.xlabel(xlabel)
@@ -44,18 +48,18 @@ def save_ssim_lpips_plot(rows, title: str, xlabel: str, out_name: str):
     lpips = [r['test_lpips'] for r in rows]
 
     fig, ax1 = plt.subplots(figsize=(14, 5))
-    ax1.plot(x, ssim, marker='o', color='#2a9d8f')
-    ax1.set_ylabel('Test SSIM', color='#2a9d8f')
-    ax1.tick_params(axis='y', labelcolor='#2a9d8f')
+    ax1.plot(x, ssim, marker='o', color=GREEN)
+    ax1.set_ylabel('Test SSIM', color=GREEN)
+    ax1.tick_params(axis='y', labelcolor=GREEN)
     ax1.set_xticks(range(len(x)))
     ax1.set_xticklabels(x, rotation=35, ha='right')
     ax1.set_xlabel(xlabel)
     ax1.grid(alpha=0.25)
 
     ax2 = ax1.twinx()
-    ax2.plot(x, lpips, marker='s', color='#e76f51')
-    ax2.set_ylabel('Test LPIPS (lower better)', color='#e76f51')
-    ax2.tick_params(axis='y', labelcolor='#e76f51')
+    ax2.plot(x, lpips, marker='s', color=VERMILLION)
+    ax2.set_ylabel('Test LPIPS (lower better)', color=VERMILLION)
+    ax2.tick_params(axis='y', labelcolor=VERMILLION)
 
     plt.title(title)
     fig.tight_layout()
